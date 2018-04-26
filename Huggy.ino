@@ -44,7 +44,7 @@ volatile State debugState = STOP_MP3;
 WiFiClient client;
 MicroGear microgear(client);
 
-bool debug = true;
+bool debug = false;
 
 volatile uint8_t count;
 uint8_t maxCount=3;
@@ -142,7 +142,7 @@ void debugWiFi(){
   Serial.println(WiFi.localIP());
 }
 void deployWiFi(){
-
+  // Enanble WiFi Manager
 }
 void StatusCallback(void *cbData, int code, const char *string)
 {
@@ -289,7 +289,10 @@ void waiting(){
   }
 }
 void sleep(){
-  //ESP.deepSleep(0);
+  if(debug)
+     turnstile(WAITING_URL);
+  else
+    ESP.deepSleep(0);
 }
 void loop() {
   if(debug)
@@ -323,7 +326,25 @@ void debugging(){
 }
 
 void deploy(){
-  
+    while(1){
+    switch(state){
+      case WAITING_URL:
+        delay(500);
+        break;
+      case PLAYING_MP3:
+        runningMP3();
+        break;
+      case STOP_MP3:
+        stopMP3();
+        break;
+     case LOST_CONNECTION_NETPIE:
+        reconnectNETPIE();
+      case SLEEP:
+        sleep();
+      default:
+        break;
+    }
+  }
 }
 
 void turnstile(State s){
