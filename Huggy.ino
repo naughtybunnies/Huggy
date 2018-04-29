@@ -5,35 +5,19 @@
 #else
     #include <ESP8266WiFi.h>
 #endif
-
 #include "AudioFileSourceICYStream.h"
 #include "AudioFileSourceBuffer.h"
 #include "AudioGeneratorMP3.h"
 #include "AudioOutputI2SNoDAC.h"
-
 #include <Arduino.h>
 #include <Ticker.h>
-#include <ESP8266WiFi.h>
 #include <MicroGear.h>
-#include <DNSServer.h>
-#include <ESP8266WebServer.h>
-#include <WiFiManager.h>     
 
 #define RGB_R_PIN D1
 #define RGB_G_PIN D2
 #define RGB_B_PIN D3
 #define B_PIN D4
 #define HDX_2_PIN D5
-
-bool debug = false;
-
-const int WIFI_BLINKING_RATE = 100;
-const char *ssid = "khuneieiza";
-const char *password = "12341234";
-
-WiFiManager wifiManager;
-
-Ticker ticker;
 
 enum State{
   SETTING_UP,
@@ -44,6 +28,7 @@ enum State{
   WAITING_URL,
   PLAYING_MP3,
   STOP_MP3,
+  REPEATING_MP3,
   LOST_CONNECTION_NETPIE,
   SLEEP
 };
@@ -51,118 +36,37 @@ enum State{
 
 State state = PLAYING_MP3;
 
+#define WIFI_BLINKING_RATE 100
+WiFiClient client;
+MicroGear microgear(client);
 
-unsigned long timeStart = 0;
-unsigned long timePass = 0;
+Ticker ticker;
 
-volatile uint8_t count;
-uint8_t maxCount=3;
-volatile uint8_t timeout;
-uint8_t maxTimeout=10;
+const char *ssid = "ZTE_2.4G_HqhbFA";
+const char *password = "3NrqKMFQ";
 
-// Randomly picked URL
 const char *URL="http://35.197.128.63/mp3/orjao64.mp3";
-
 char url[1024];
+
 AudioGeneratorMP3 *mp3;
 AudioFileSourceICYStream *file;
 AudioFileSourceBuffer *buff;
 AudioOutputI2SNoDAC *out;
 
+unsigned long timeStart=0;
+unsigned long timePass=0;
+unsigned long playingTime = 60*1000;
+
+uint8_t count;
+uint8_t maxCount=1;
+uint8_t timeout;
+uint8_t maxTimeout=10;
 
 // NETPIE Configurations 
 #define APPID   "huggy"
 #define KEY     "rxZRWneDKAa0Inm"
 #define SECRET  "CN52FBb9TaUzvYUCqjDZkkXzJ"
 #define ALIAS   "NodeMCU"
-
-WiFiClient client;
-MicroGear microgear(client);
-
-
-void debugWiFi(){
-  Serial.print("[DEBUG] Connecting to WiFi");
-  if (WiFi.begin(ssid, password)) {
-    while (WiFi.status() != WL_CONNECTED) {
-      Serial.print(".");
-      delay(500);
-    }
-  }
-  Serial.print("\n[DEBUG] WiFi connected, IP address: ");
-  Serial.println(WiFi.localIP());
-}
-
-void deployWiFi(){
-  Serial.print("MAC: ");
-  Serial.println(WiFi.macAddress());
-  wifiManager.autoConnect("Huggy","12345678");
-}
-
-// Called when a metadata event occurs (i.e. an ID3 tag, an ICY block, etc.
-void MDCallback(void *cbData, const char *type, bool isUnicode, const char *string)
-{
-  const char *ptr = reinterpret_cast<const char *>(cbData);
-  (void) isUnicode; // Punt this ball for now
-  // Note that the type and string may be in PROGMEM, so copy them to RAM for printf
-  char s1[32], s2[64];
-  strncpy_P(s1, type, sizeof(s1));
-  s1[sizeof(s1)-1]=0;
-  strncpy_P(s2, string, sizeof(s2));
-  s2[sizeof(s2)-1]=0;
-  Serial.printf("METADATA(%s) '%s' = '%s'\n", ptr, s1, s2);
-  Serial.flush();
-}
-
-// Called when there's a warning or error (like a buffer underflow or decode hiccup)
-void StatusCallback(void *cbData, int code, const char *string)
-{
-  const char *ptr = reinterpret_cast<const char *>(cbData);
-  // Note that the string may be in PROGMEM, so copy it to RAM for printf
-  char s1[64];
-  strncpy_P(s1, string, sizeof(s1));
-  s1[sizeof(s1)-1]=0;
-  Serial.printf("STATUS(%s) '%d' = '%s'\n", ptr, code, s1);
-  Serial.flush();
-}
-void onMsghandler(char *topic, uint8_t* msg, unsigned int msglen) {
-  Serial.print("[DEBUG] Incoming message --> ");
-  memset(url,0,sizeof(url));
-  for(int i=0; i<msglen; i++){
-    url[i]=(char)msg[i];
-  }
-  url[msglen] = '\0';
-  Serial.println(url);
-  if(state==WAITING_URL){
-    Serial.println("[DEBUG] Preparing to data");
-    file = new AudioFileSourceICYStream(url);
-    file->RegisterMetadataCB(MDCallback, (void*)"ICY");
-    buff = new AudioFileSourceBuffer(file, 2048);
-    buff->RegisterStatusCB(StatusCallback, (void*)"buffer");
-    out = new AudioOutputI2SNoDAC();
-    mp3 = new AudioGeneratorMP3();
-    mp3->RegisterStatusCB(StatusCallback, (void*)"mp3");
-    mp3->begin(buff, out);
-    turnstile(PLAYING_MP3);
-  }
-}
-void onFoundgear(char *attribute, uint8_t* msg, unsigned int msglen) {
-    Serial.print("[DEBUG] Found new member --> ");
-    for (int i=0; i<msglen; i++)
-        Serial.print((char)msg[i]);
-    Serial.println();  
-}
-void onLostgear(char *attribute, uint8_t* msg, unsigned int msglen) {
-    Serial.print("[DEBUG] Lost member --> ");
-    for (int i=0; i<msglen; i++)
-        Serial.print((char)msg[i]);
-    Serial.println();
-}
-void onConnected(char *attribute, uint8_t* msg, unsigned int msglen) {
-    Serial.println("[DEBUG] Connected to NETPIE...");
-    microgear.setAlias(ALIAS);
-    turnstile(WAITING_URL);
-    //turnstile(PLAYING_MP3);
-}
 
 void LEDLoop1(){
   int color[3] = {0, 0, 0};
@@ -221,7 +125,7 @@ void LEDLoop1(){
 }
 // Blinking blue led during WiFi connecting
 void LEDLoop2(){
-  for(int i=0;i<10;i++){
+  for(int i=0;i<1;i++){
     while(state == WIFI_CONNECTING){
       digitalWrite(B_PIN,HIGH);
       delay(WIFI_BLINKING_RATE);
@@ -253,6 +157,75 @@ void LEDBatteryLevel(){
   Serial.println(battery);
 }
 
+void MDCallback(void *cbData, const char *type, bool isUnicode, const char *string)
+{
+  const char *ptr = reinterpret_cast<const char *>(cbData);
+  (void) isUnicode; // Punt this ball for now
+  // Note that the type and string may be in PROGMEM, so copy them to RAM for printf
+  char s1[32], s2[64];
+  strncpy_P(s1, type, sizeof(s1));
+  s1[sizeof(s1)-1]=0;
+  strncpy_P(s2, string, sizeof(s2));
+  s2[sizeof(s2)-1]=0;
+  Serial.printf("METADATA(%s) '%s' = '%s'\n", ptr, s1, s2);
+  Serial.flush();
+}
+
+void StatusCallback(void *cbData, int code, const char *string)
+{
+  const char *ptr = reinterpret_cast<const char *>(cbData);
+  // Note that the string may be in PROGMEM, so copy it to RAM for printf
+  char s1[64];
+  strncpy_P(s1, string, sizeof(s1));
+  s1[sizeof(s1)-1]=0;
+  Serial.printf("STATUS(%s) '%d' = '%s'\n", ptr, code, s1);
+  Serial.flush();
+}
+
+void onMsghandler(char *topic, uint8_t* msg, unsigned int msglen) {
+  Serial.print("[DEBUG] Incoming message --> ");
+  memset(url,0,sizeof(url));
+  for(int i=0; i<msglen; i++){
+    url[i]=(char)msg[i];
+  }
+  url[msglen] = '\0';
+  Serial.println(url);
+  if(state==WAITING_URL){
+    Serial.println("[DEBUG] Preparing to data");
+    file = new AudioFileSourceICYStream(url);
+    file->RegisterMetadataCB(MDCallback, (void*)"ICY");
+    buff = new AudioFileSourceBuffer(file, 2048);
+    buff->RegisterStatusCB(StatusCallback, (void*)"buffer");
+    out = new AudioOutputI2SNoDAC();
+    mp3 = new AudioGeneratorMP3();
+    mp3->RegisterStatusCB(StatusCallback, (void*)"mp3");
+    delay(500);
+    mp3->begin(buff, out);
+    timeStart = millis();
+    turnstile(PLAYING_MP3);
+  }
+}
+
+void onFoundgear(char *attribute, uint8_t* msg, unsigned int msglen) {
+    Serial.print("[DEBUG] Found new member --> ");
+    for (int i=0; i<msglen; i++)
+        Serial.print((char)msg[i]);
+    Serial.println();  
+}
+
+void onLostgear(char *attribute, uint8_t* msg, unsigned int msglen) {
+    Serial.print("[DEBUG] Lost member --> ");
+    for (int i=0; i<msglen; i++)
+        Serial.print((char)msg[i]);
+    Serial.println();
+}
+
+void onConnected(char *attribute, uint8_t* msg, unsigned int msglen) {
+    Serial.println("[DEBUG] Connected to NETPIE...");
+    microgear.setAlias(ALIAS);
+    turnstile(WAITING_URL);
+}
+
 void setupLEDs(){
   Serial.println("[DEBUG] Setting LED pins");
   pinMode(RGB_R_PIN, OUTPUT);
@@ -265,6 +238,27 @@ void setupLEDs(){
   digitalWrite(RGB_B_PIN, LOW);
   digitalWrite(B_PIN, LOW);
 }
+
+void setupWiFi(){
+  Serial.print("[DEBUG] Connecting to WiFi");
+  
+  WiFi.disconnect();
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);
+
+  if (WiFi.begin(ssid, password)) {
+    while (WiFi.status() != WL_CONNECTED) {
+      Serial.print(".");
+      digitalWrite(B_PIN,HIGH);
+      delay(WIFI_BLINKING_RATE);
+      digitalWrite(B_PIN,LOW);
+      delay(WIFI_BLINKING_RATE);
+    }
+  }
+  Serial.print("\n[DEBUG] WiFi connected, IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
 void setupNETPIE(){
   Serial.println("[DEBUG] Setting NETPIE");
   microgear.on(MESSAGE,onMsghandler);
@@ -273,56 +267,35 @@ void setupNETPIE(){
   microgear.on(CONNECTED,onConnected);
 }
 
-void setup() {
+void setup()
+{
   Serial.begin(115200);
-  if(debug){
-    Serial.println("\nEntered debug mode");
-  }else{
-    Serial.println("\nEntered deployment mode");
-  }
-  Serial.println("[START]");
-  turnstile(SETTING_UP);
   setupLEDs();
-  setupNETPIE();
   LEDLoop1();  
-  turnstile(WIFI_CONNECTING);
-  if(debug)
-    debugWiFi();
-  else {
-    deployWiFi();
-  }
-  turnstile(WIFI_CONNECTED);
-  LEDLoop3();
+  setupWiFi();
+  setupNETPIE();
   Serial.println("[INITIALIZING_NETPIE]");
   turnstile(INIT_NETPIE);
   microgear.init(KEY,SECRET,ALIAS);
   microgear.connect(APPID);
+  LEDLoop3();
   LEDBatteryLevel();
 }
 
-void reconnectNETPIE(){
-  while(!microgear.connected()){
-    Serial.print(".");
-    microgear.connect(APPID);
-    delay(500);
-  }
-  turnstile(WAITING_URL);
-}
-
-void watingURL(){
+void waitingURL(){
   if(!microgear.connected())
     turnstile(LOST_CONNECTION_NETPIE);
+  else
+    microgear.loop();
 }
 
 void playingMP3(){
   timePass = millis();
-  if( (timePass-timeStart) > 600000 ){
-    if(mp3->isRunning()){
-      mp3->stop();
-      turnstile(STOP_MP3);
-      return;
-    }
-    Serial.println("MP3 timeout");
+  if( (timePass-timeStart) >= playingTime ){
+    mp3->stop();
+    turnstile(STOP_MP3);
+    Serial.println("[MP3_TIMEOUT]");
+    return;
   }else{
     if (mp3->isRunning()) {
       if (!mp3->loop()) mp3->stop();
@@ -330,7 +303,6 @@ void playingMP3(){
     else{
       mp3->stop();
       turnstile(STOP_MP3);
-      return;
     }
   }
 }
@@ -338,8 +310,7 @@ void playingMP3(){
 void stopMP3(){
   count = 0;  
   timeout = 0;
-  LEDBatteryLevel();
-  Serial.println("[DEBUG] MP3 done");
+  Serial.println("[DEBUG] MP3 stop");
   ticker.attach(1,waiting);
   while(state==STOP_MP3){
     delay(500);
@@ -348,10 +319,9 @@ void stopMP3(){
       count++;
     }
     if(count>maxCount){
-      Serial.println("[DEBUG] Tapped to maximum");
-      mp3->begin(buff, out);
-      turnstile(PLAYING_MP3);
-      return;
+      ticker.detach();
+      turnstile(REPEATING_MP3);
+      break;
     }
   }
 }
@@ -363,29 +333,50 @@ void waiting(){
     timeout++;
   }
   if(timeout>maxTimeout){
-    turnstile(SLEEP);
     ticker.detach();
+    turnstile(SLEEP);
   }
 }
 
 void sleep(){
-  analogWrite(RGB_R_PIN, 0);
-  analogWrite(RGB_G_PIN, 0);
-  analogWrite(RGB_B_PIN, 0);
   ESP.deepSleep(0);
+}
+
+void repeatingMP3(){
+  delete file;
+  delete buff;
+  file = new AudioFileSourceICYStream(url);
+  file->RegisterMetadataCB(MDCallback, (void*)"ICY");
+  buff = new AudioFileSourceBuffer(file, 2048);
+  buff->RegisterStatusCB(StatusCallback, (void*)"buffer");
+  delay(500);
+  mp3->begin(buff, out);
+  timeStart = millis();
+  turnstile(PLAYING_MP3);
+}
+void reconnectNETPIE(){
+  while(!microgear.connected()){
+    Serial.print(".");
+    microgear.connect(APPID);
+    delay(500);
+  }
+  turnstile(WAITING_URL);
 }
 
 void loop()
 {
   switch(state){
     case WAITING_URL:
-      microgear.loop();
+      waitingURL();
       break;
     case PLAYING_MP3:
       playingMP3();
       break;
     case STOP_MP3:
       stopMP3();
+      break;
+    case REPEATING_MP3:
+      repeatingMP3();
       break;
     case LOST_CONNECTION_NETPIE:
       reconnectNETPIE();
@@ -422,6 +413,9 @@ void turnstile(State s){
       break;
     case STOP_MP3:
       Serial.println("[STOP_MP3]");
+      break;
+    case REPEATING_MP3:
+      Serial.println("[REPREATING_MP3]");
       break;
     case LOST_CONNECTION_NETPIE:
       Serial.println("[LOST_CONNECTION_NETPIE]");
