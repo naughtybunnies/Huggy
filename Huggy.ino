@@ -1,5 +1,4 @@
 #include <Arduino.h>
-
 #ifdef ESP32
     #include <WiFi.h>
 #else
@@ -13,12 +12,14 @@
 #include <Ticker.h>
 #include <MicroGear.h>
 
+// Defining output pins
 #define RGB_R_PIN D1
 #define RGB_G_PIN D2
 #define RGB_B_PIN D3
 #define B_PIN D4
 #define HDX_2_PIN D5
 
+// Defining states of huggy by using enum
 enum State{
   SETTING_UP,
   INIT,
@@ -34,18 +35,20 @@ enum State{
 };
 
 
-State state = PLAYING_MP3;
-
+State state = SETTING_UP;
+// WiFi 
 #define WIFI_BLINKING_RATE 100
 WiFiClient client;
 MicroGear microgear(client);
+const char *ssid = "ZTE_2.4G_HqhbFA";
+const char *password = "3NrqKMFQ";
+//const char *ssid = "Sangrit's iPhone";
+//const char *password = "qwertyuiop";
 
 Ticker ticker;
 
-const char *ssid = "ZTE_2.4G_HqhbFA";
-const char *password = "3NrqKMFQ";
-
 const char *URL="http://35.197.128.63/mp3/orjao64.mp3";
+
 char url[1024];
 
 AudioGeneratorMP3 *mp3;
@@ -55,7 +58,7 @@ AudioOutputI2SNoDAC *out;
 
 unsigned long timeStart=0;
 unsigned long timePass=0;
-unsigned long playingTime = 60*1000;
+unsigned long playingTime = 10*60*1000;
 
 uint8_t count;
 uint8_t maxCount=1;
@@ -68,6 +71,7 @@ uint8_t maxTimeout=10;
 #define SECRET  "CN52FBb9TaUzvYUCqjDZkkXzJ"
 #define ALIAS   "NodeMCU"
 
+// Performing rainbow color pattern of RGB LED
 void LEDLoop1(){
   int color[3] = {0, 0, 0};
   for(int i=0;i<=255;i++){
@@ -123,19 +127,9 @@ void LEDLoop1(){
   digitalWrite(RGB_G_PIN, LOW);
   digitalWrite(RGB_B_PIN, LOW);
 }
-// Blinking blue led during WiFi connecting
-void LEDLoop2(){
-  for(int i=0;i<1;i++){
-    while(state == WIFI_CONNECTING){
-      digitalWrite(B_PIN,HIGH);
-      delay(WIFI_BLINKING_RATE);
-      digitalWrite(B_PIN,LOW);
-      delay(WIFI_BLINKING_RATE); 
-    }
-  }
-}
+
 // Blinking blue led after connect to WiFi
-void LEDLoop3(){
+void LEDLoop2(){
   digitalWrite(B_PIN,HIGH);
   delay(3000);
   digitalWrite(B_PIN,LOW);
@@ -182,11 +176,12 @@ void StatusCallback(void *cbData, int code, const char *string)
   Serial.flush();
 }
 
+// Receive a message from NETPIE
 void onMsghandler(char *topic, uint8_t* msg, unsigned int msglen) {
   Serial.print("[DEBUG] Incoming message --> ");
   memset(url,0,sizeof(url));
   for(int i=0; i<msglen; i++){
-    url[i]=(char)msg[i];
+    url[i]=(char)msg[i];        // Store a message to url, it will be used as the url of the track to play
   }
   url[msglen] = '\0';
   Serial.println(url);
@@ -239,6 +234,7 @@ void setupLEDs(){
   digitalWrite(B_PIN, LOW);
 }
 
+// Connect to fixed WiFi
 void setupWiFi(){
   Serial.print("[DEBUG] Connecting to WiFi");
   
@@ -267,9 +263,12 @@ void setupNETPIE(){
   microgear.on(CONNECTED,onConnected);
 }
 
+// Setting up all the hardware configuration
 void setup()
 {
   Serial.begin(115200);
+  Serial.flush();
+  Serial.println();
   setupLEDs();
   LEDLoop1();  
   setupWiFi();
@@ -278,25 +277,27 @@ void setup()
   turnstile(INIT_NETPIE);
   microgear.init(KEY,SECRET,ALIAS);
   microgear.connect(APPID);
-  LEDLoop3();
+  LEDLoop2();
   LEDBatteryLevel();
 }
 
+// Waiting for track selection
 void waitingURL(){
   if(!microgear.connected())
-    turnstile(LOST_CONNECTION_NETPIE);
+    turnstile(LOST_CONNECTION_NETPIE);    
   else
     microgear.loop();
 }
 
+// Track is being played 
 void playingMP3(){
-  timePass = millis();
-  if( (timePass-timeStart) >= playingTime ){
-    mp3->stop();
+  timePass = millis();                        // Checking how much playing time pass                 
+  if( (timePass-timeStart) >= playingTime ){  // Track played more than desired playing time
+    mp3->stop();                              // Stop track and change state to STOP_MP3
     turnstile(STOP_MP3);
-    Serial.println("[MP3_TIMEOUT]");
+    Serial.println("[MP3_TIMEOUT]");  
     return;
-  }else{
+  }else{                                      // Track finishes playing
     if (mp3->isRunning()) {
       if (!mp3->loop()) mp3->stop();
     }
@@ -311,10 +312,10 @@ void stopMP3(){
   count = 0;  
   timeout = 0;
   Serial.println("[DEBUG] MP3 stop");
-  ticker.attach(1,waiting);
+  ticker.attach(1,waiting);             // Using timer to wait for detection of vibration for M seconds
   while(state==STOP_MP3){
     delay(500);
-    if(digitalRead(HDX_2_PIN)==HIGH){
+    if(digitalRead(HDX_2_PIN)==HIGH){   // Vibration detected
       Serial.println("[DEBUG] Tapped");
       count++;
     }
@@ -339,13 +340,14 @@ void waiting(){
 }
 
 void sleep(){
-  ESP.deepSleep(0);
+  ESP.deepSleep(0); // Put huggy to sleep
 }
 
+// Repeat track agian after tapped N time(s)
 void repeatingMP3(){
   delete file;
   delete buff;
-  file = new AudioFileSourceICYStream(url);
+  file = new AudioFileSourceICYStream(url);                
   file->RegisterMetadataCB(MDCallback, (void*)"ICY");
   buff = new AudioFileSourceBuffer(file, 2048);
   buff->RegisterStatusCB(StatusCallback, (void*)"buffer");
@@ -354,6 +356,8 @@ void repeatingMP3(){
   timeStart = millis();
   turnstile(PLAYING_MP3);
 }
+
+// Reconnect to NETPIE service, if lost connection
 void reconnectNETPIE(){
   while(!microgear.connected()){
     Serial.print(".");
@@ -363,6 +367,7 @@ void reconnectNETPIE(){
   turnstile(WAITING_URL);
 }
 
+// Main loop
 void loop()
 {
   switch(state){
@@ -387,6 +392,7 @@ void loop()
   }
 }
 
+// State handler, used for debugging
 void turnstile(State s){
   state = s;
   switch(state){
